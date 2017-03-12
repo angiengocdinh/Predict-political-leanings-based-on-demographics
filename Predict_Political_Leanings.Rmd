@@ -1,0 +1,685 @@
+---
+title: 'Code Appendix: Multiple Regression Final Project extension'
+author: "Ngoc Dinh, Zoe Meers, Monica Swartz"
+date: "November 20, 2016"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r, include=FALSE}
+#install.packages("mosaic")
+#install.packages("dplyr")
+#install.packages("stringr")
+#install.packages("tidyr")
+#install.packages("readr")
+#install.packages("leaps")
+#install.packages("car")
+#install.packages("glmnet")
+#install.packages("boot")
+#install.packages("hash")
+require(mosaic)
+require(dplyr)
+require(stringr)
+require(tidyr)
+require(readr)
+require(leaps)
+require(car)
+require(glmnet)
+require(boot)
+```
+
+#1. Data cleaning 
+```{r, message=FALSE, warning=FALSE}
+cses4 <- read_csv("C:/Users/stuadmin/Desktop/Projects/cses4_csv/cses4.csv")
+```
+
+
+This data has 448 variables and 51663 observations.
+```{r}
+dim(cses4)
+```
+
+Many variables are completely irrelevant to this research topic, which are removed from the dataset. 
+```{r}
+getUnusedVars <- function(col_name){
+  variable_number = as.numeric(str_sub(col_name,2,5))
+  return((variable_number<2001 & variable_number!=1004 & variable_number!=1006) |
+      variable_number > 3017 |
+      variable_number %in% c(3005,3006,3007,3008,3011,3012,3013,3015,3016,3021,3025))
+}
+
+remove=lapply(names(cses4),getUnusedVars)
+
+political_data=cses4[-which(remove==TRUE)]
+
+```
+
+I also choose to include survey year (to calculate the age at the time of the survey) and country:
+```{r}
+political_data= political_data %>%
+  mutate(Survey_Year=as.integer(str_sub(D1004,-4,-1)),
+         Country=D1006_NAM,
+         D1006_NAM=NULL, 
+         D1004=NULL,
+         D1006_UN=NULL,
+         D1006=NULL)
+```
+
+#####Structure and name
+
+```{r}
+dim(political_data)
+```
+
+After removing irrelevant variable sections, there are now 54 variables that we will use to select the best model. 
+
+```{r}
+names(political_data)
+```
+
+The variable names are not clear and need to be renamed to something more descriptive.
+
+From the codebook, I know that missing/privacy restricted values in this data are coded as 7-9, 95-99, 995-999, 9995-9999, 99995-99999 depending on the value range of the variable. These numbers are outside the range of the variable values; therefore, leaving these values unchanged can create high leverage points. I create a function to set coded NA values back to NA.
+
+```{r}
+setNA <- function(column){
+  # Set coded NA values back to NAs
+  #   Args: the dataset
+  #   Returns: the new dataset, with coded NA values back as NAs.
+    if (max(column)==9){
+      column[which(column>6)] <- NA 
+    } else if (max(column)==99){
+      column[which(column>94)] <- NA 
+    } else if (max(column)==999){
+      column[which(column>994)] <- NA 
+    } else if (max(column)==9999){
+      column[which(column>9994)] <- NA 
+    } else if (max(column)==99999){
+      column[which(column>99994)] <- NA 
+    }
+  return(column)
+}
+
+political_data=lapply(political_data, setNA)
+
+```
+
+
+```{r}
+str(political_data)
+```
+
+All variables are currently in numeric types, but most of them are actually categorical (factor). I create a function to change categorical variables to factor type and leave numeric variables unchanged. Of the remaining variables, only birth year and political spectrum (left/right wing) are numeric
+
+```{r, results="hide"}
+convertToFactor <- function(mydata){
+  # Convert categorical variables to factor, leaving quantitative variables unchanged
+  # Args: the dataset
+  # Returns: the modified data
+  data_with_factor <- mydata %>%
+  mutate_each(funs(as.factor)) %>%
+  mutate(D2001_Y=as.numeric(as.character(D2001_Y)),
+         D3014=as.numeric(as.character(D3014)),
+         D2021=as.numeric(as.character(D2021)))
+  return(data_with_factor)
+}
+political_data=convertToFactor(as.data.frame(political_data))
+str(political_data)
+
+```
+
+For convenience while doing the backward elimination algorithm, I move the dependent variable(Left/Right Wing, or D3014 in the codebook) to the first column and rename it to Left_Right_Wing
+```{r}
+data_x=political_data%>%
+  mutate(D3014=NULL)
+D3014=political_data$D3014
+political_data=cbind(D3014, data_x)
+political_data = political_data%>%
+  rename("Left_Right_Wing"=D3014)
+```
+
+
+My preliminary variable check show that there are a lot of missing values in the data. If I remove all observations with at least one variable missing, there will be no data left to use. Hence I need to remove variables that have too many missing values, since values with are usually not useful.
+The challenge here is that the more variable I include, the smaller the sample size gets, but if I include few variables, I risk removing useful variables. After some trial and error, I choose to remove variables that have more than 18000 missing values, which leaves me with 38 variables and 1308 observations 
+
+```{r,results="hide"}
+checkNumNALimit <- function(column, NA_limit){
+  # Remove variables that have the number of missing values above a certain limit
+  # Args:
+  #   mydata: the dataset
+  #   NA_limit: the maximum number of NA values allowed in a variable
+  # Returns: the new dataset: missing values are removed and variables with the number of missing values
+  # above the limit are removed
+    return (sum(is.na(column))>NA_limit)
+}
+
+col_to_remove=lapply(political_data, function(x) checkNumNALimit(x,25000))
+political_data=political_data[-which(col_to_remove==TRUE)]
+str(political_data)
+```
+
+I rename the variables into more descriptive names
+```{r}
+political_data = political_data %>% 
+  rename("Birth_Year"=D2001_Y, 
+         "Gender"=D2002, 
+         "Education"=D2003, 
+         "Marital_Status"=D2004, 
+         "Union_Membership"=D2005,
+         "Union_Membership_Family"=D2006,
+         "Farmer_Assosication"=D2008,
+         "Employ_Status"=D2010,
+         "Occupation"=D2011,
+         "Public_Private_Employ"=D2013,
+         "Employ_Status_Spouse"=D2015,
+         "Household_Income"=D2020,
+         "Number_Household"=D2021,
+         "Num_Young_Child"=D2022,
+         "Religious_Attendance"=D2024,
+         "Religiousity"=D2025,
+         "Religious_Denomination"=D2026,
+         "Region"=D2028,
+         "Rural_Urban"=D2031,
+         "District"=D2032,
+         "Birth_COuntry"=D2033,
+         "Public_Expense_Health"=D3001_1,
+         "Public_Expense_Edu"=D3001_2,
+         "Public_Expense_UnEmpl"=D3001_3,
+         "Public_Expense_Defense"=D3001_4,
+         "Public_Expense_Pension"=D3001_5,
+         "Public_Expense_Business"=D3001_6,
+         "Public_Expense_Police"=D3001_7,
+         "Public_Expense_Welfare"=D3001_8,
+         "Improv_Standard"=D3002,
+         "Economy"=D3003_1,
+         "Gov_Action_Dif_Income"=D3004,
+         "Power_Make_Dif"=D3009,
+         "Vote_Make_Dif"=D3010,
+         "Satisfaction_Democrat"=D3017) %>%
+           mutate(Age=as.numeric(as.character(Survey_Year)) - as.numeric(as.character(Birth_Year)), Birth_Year=NULL, Survey_Year=NULL)
+```
+
+```{r}
+final_political_data=na.omit(political_data)
+dim(final_political_data)
+```
+
+
+
+#Model Selection
+
+##1. Automatic Variable Selection:
+
+###Step 1: Backward Elimination Algorithm
+
+I run the algorithm the first time to remove completely irrelevant variables. I set the p-value cut-off to be 0.1, to eliminate the risk of removing relevant variables
+
+```{r, result="hide"}
+getIndexFromName <- function(mydata,name){
+  # Return the index of a given variable in the dataset
+  # Args: 
+  #   mydata: the data set
+  #   name: the name of the variable
+  # Returns:
+  #   The index of that variable
+  result=which(names(mydata)==name)
+  return (result)
+}
+
+backwardElim <- function(mydata, min_var, kfold){
+  # Perform backward elimination to choose the best model
+  # Args: 
+  #   mydata: the dataset
+  #   min_var: the minimum number of variables we want to include
+  # Returns: the data with the minimum number of variables
+  # Prints out the variables, R-squared, and AIC for each model.
+  
+  min_var_reached=FALSE
+  data_model_selection=mydata
+#while the number of variables are more than the minimum number of variables
+  while(!min_var_reached){
+    
+    #perform regression on all the variables
+    regression=lm(Left_Right_Wing ~., data=data_model_selection) 
+    
+    #get the table of overall significance (of each factor variables across all levels), variable name, and p-value of overall significance
+    anova_model=anova(regression)
+    var_name=row.names(anova_model)[-length(row.names(anova_model))]
+    p_value=anova_model[1:length(anova_model[,1])-1,5]
+  
+    #create a table of variable name and their corresponding overall significance p-value
+    p_value_table=data.frame(var_name, p_value)
+  
+    #find the least significant variable: its index, name, and p-value
+    least_significant=which.max(p_value_table$p_value)
+    least_significant_name=p_value_table$var_name[least_significant]
+    max_p_value=p_value_table$p_value[least_significant]
+    
+    #if the number of variables is equal to the minimum, end loop
+    if (length(p_value)==min_var){
+      min_var_reached=TRUE
+    } 
+    
+    #otherwise, set the p-value of the least significant variable to 0 in the p-value table
+    p_value_table$p_value[least_significant]=0
+    
+    #Find the least significant variable in the data table by name, then remove it 
+    index_removed=getIndexFromName(data_model_selection, least_significant_name)
+    data_model_selection=data_model_selection[-index_removed]
+    
+    #If the least significant p-value is less than 0.05, meaning that all variables are signficant,
+    #print out variable names, R-squared, and AIC for model selection
+    if (max_p_value < 0.1){
+      print("Variables:")
+      print(var_name)
+      print(paste("Adj R-squared:",summary(regression)$adj.r.squared,sep=" "))
+      print(paste("AIC:",AIC(regression),sep=" "))
+      if (kfold){
+        set.seed(20)
+        cv.error.10=rep(0 ,10)
+        for (i in 1:10){
+          glm.fit=glm(Left_Right_Wing ~. ,data=data_model_selection)
+          cv.error.10[i]=cv.glm(data_model_selection, glm.fit ,K=10) $delta [1]
+        }
+        print("MSE cross-validation")
+        print(mean(cv.error.10))
+      }
+    }
+  }
+  return (data_model_selection)
+}
+new_data=backwardElim(final_political_data,25,kfold=FALSE)
+```
+
+###Step 2: Variable Analysis
+
+The list of significant variables listed. Variables that can be included are modified into more descriptive level names.
+
+```{r}
+political_data=subset(political_data, select=c(Left_Right_Wing, Gender, Education, Union_Membership, Union_Membership_Family, Employ_Status, Occupation, Public_Private_Employ, Employ_Status_Spouse, Household_Income, Number_Household, Religiousity, Birth_COuntry, Public_Expense_Health, Public_Expense_Edu, Public_Expense_Defense, Public_Expense_Pension, Public_Expense_Police, Public_Expense_Welfare, Improv_Standard, Economy, Gov_Action_Dif_Income, Satisfaction_Democrat))
+
+final_political_data=na.omit(political_data)
+```
+
+```{r}
+dim(final_political_data)
+any(is.na(final_political_data))
+```
+
+```{r, results="hide"}
+final_political_data$Female=ifelse(final_political_data$Gender==1,0,1)
+final_political_data$Gender=NULL
+
+any(is.na(final_political_data))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data,
+                                  Education=case_when(
+                                Education==1 ~ "Early Childhood Education",
+                                Education==2 ~ "Primary School",
+                                Education==3 ~ "Lower Secondary", 
+                                Education==4 ~ "Upper Secondary", 
+                                Education==5 ~ "Post-Secondary Non-Tertiary", 
+                                Education==6 ~ "Short-cycle Tertiary", 
+                                Education==7 ~ "Bachelor or Equivalent", 
+                                Education==8 ~ "Master or Equivalent", 
+                                Education==9 ~ "Doctoral or Equivalent", 
+                                Education==96 ~ "No Education",
+                                is.na(Education) ~ "Missing")))
+any(is.na(final_political_data))
+
+
+final_political_data <- with(final_political_data,
+  mutate(final_political_data,
+         Union_Membership=case_when(
+           Union_Membership==1 ~ 1,
+           Union_Membership==2 ~ 0)))
+
+any(is.na(final_political_data))
+
+
+final_political_data <- with(final_political_data,
+  mutate(final_political_data,
+         Union_Membership_Family=case_when(
+           Union_Membership_Family==1 ~ "1",
+           Union_Membership_Family==2 ~ "0"
+           ,
+           is.na(Union_Membership_Family) ~ "Missing")))
+
+any(is.na(final_political_data))
+
+
+final_political_data <- with(final_political_data,
+  mutate(final_political_data,
+         Employ_Status=case_when(
+           Employ_Status==1 ~ "Full-time",
+           Employ_Status==2 ~ "Part-time",
+           Employ_Status==3 ~ "Less than 15 hours",
+           Employ_Status==4 ~ "Help Family",
+           Employ_Status==5 ~ "Unemployed",
+           Employ_Status==6 ~ "Student",
+           Employ_Status==7 ~ "Retired",
+           Employ_Status==8 ~ "Housewife",
+           Employ_Status==9 ~ "Disabled",
+           Employ_Status==10 | Employ_Status ==11 | Employ_Status==12 ~ "Other",
+           is.na(Employ_Status) ~"Missing")))
+
+any(is.na(final_political_data))
+
+
+final_political_data <- with(final_political_data,
+  mutate(final_political_data,
+         Gov_Action_Dif_Income=case_when(
+          Gov_Action_Dif_Income==1 ~ "Strongly Agree",
+          Gov_Action_Dif_Income==2 ~ "Somewhat Agree",
+          Gov_Action_Dif_Income==3 ~ "Neither",
+          Gov_Action_Dif_Income==4 ~ "Somewhat Disagree",
+          Gov_Action_Dif_Income==5 ~ "Strongly Disagree",
+           is.na( Gov_Action_Dif_Income) ~"Missing")))
+any(is.na(final_political_data))
+
+
+final_political_data <- with(final_political_data,
+  mutate(final_political_data,
+         Employ_Status_Spouse=case_when(
+           Employ_Status_Spouse==1 ~ "Full-time",
+           Employ_Status_Spouse==2 ~ "Part-time",
+           Employ_Status_Spouse==3 ~ "Less than 15 hours",
+           Employ_Status_Spouse==4 ~ "Help Family",
+           Employ_Status_Spouse==5 ~ "Unemployed",
+           Employ_Status_Spouse==6 ~ "Student",
+           Employ_Status_Spouse==7 ~ "Retired",
+           Employ_Status_Spouse==8 ~ "Housewife",
+           Employ_Status_Spouse==9 ~ "Disabled",
+           Employ_Status_Spouse==10 | Employ_Status_Spouse==11 | Employ_Status_Spouse==12~ "Other",
+           is.na(Employ_Status_Spouse) ~"Missing")))
+any(is.na(final_political_data))
+
+
+final_political_data = final_political_data %>%
+  mutate(Occupation=as.numeric(as.character(Occupation)))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data,
+                                  Occupation=case_when(
+                                  Occupation <100 ~ "Arm Forces",
+                                  Occupation >=100 & Occupation < 200 ~ "Managers",
+                                  Occupation >=200 & Occupation < 300 ~ "Professionals",
+                                  Occupation >=300 & Occupation < 400 ~ "Technicians",
+                                  Occupation >=400 & Occupation < 500 ~ "Clerical Support",
+                                  Occupation >=500 & Occupation < 600 ~ "Service & Sales",
+                                  Occupation >=600 & Occupation < 700 ~ "Agricultural, Forestry, and Fishery",
+                                  Occupation >=700 & Occupation < 800 ~ "Craft and Trade",
+                                  Occupation >=800 & Occupation < 900 ~ "Plant and Machine Operators",
+                                  Occupation >=900 & Occupation <= 962 ~ "Elementary Occupation",
+                                  is.na(Occupation) ~ "Wrong Value")))
+
+any(is.na(final_political_data))
+
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Public_Private_Employ=case_when(
+                             Public_Private_Employ==1 ~ "Public",
+                             Public_Private_Employ==2 ~ "Private", 
+                             Public_Private_Employ==3 ~ "Mixed",
+                             Public_Private_Employ==4 ~ "Third Sector/NPO", 
+                             Public_Private_Employ==5 | Public_Private_Employ == 6 ~ "Other/Self-Employed",
+                             is.na(Public_Private_Employ) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Household_Income=case_when(
+                             Household_Income==1 ~ "Lowest Quantile",
+                             Household_Income==2 ~ "Second Lowest Quantile", 
+                             Household_Income==3 ~ "Third Lowest Quantile",
+                             Household_Income==4 ~ "Fourth Lowest Quantile", 
+                             Household_Income==5 ~ "Highest Quantile",
+                             is.na(Household_Income) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Religiousity=case_when(
+                             Religiousity==1 ~ "Not Religious",
+                             Religiousity==2 ~ "Not Very Religious", 
+                             Religiousity==3 ~ "Somewhat Religious",
+                             Religiousity==4 ~ "Very Religious", 
+                             is.na(Religiousity) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Public_Expense_Health=case_when(
+                             Public_Expense_Health==1 ~ "Much more than now",
+                             Public_Expense_Health==2 ~ "Somewhat more than now", 
+                             Public_Expense_Health==3 ~ "The same as now",
+                             Public_Expense_Health==4 ~ "Somewhat less than now", 
+                             Public_Expense_Health==5 ~ "Much less than now",
+                             is.na(Public_Expense_Health) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Public_Expense_Edu=case_when(
+                             Public_Expense_Edu==1 ~ "Much more than now",
+                             Public_Expense_Edu==2 ~ "Somewhat more than now", 
+                             Public_Expense_Edu==3 ~ "The same as now",
+                             Public_Expense_Edu==4 ~ "Somewhat less than now", 
+                             Public_Expense_Edu==5 ~ "Much less than now",
+                             is.na(Public_Expense_Edu) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Public_Expense_Defense=case_when(
+                             Public_Expense_Defense==1 ~ "Much more than now",
+                             Public_Expense_Defense==2 ~ "Somewhat more than now", 
+                             Public_Expense_Defense==3 ~ "The same as now",
+                             Public_Expense_Defense==4 ~ "Somewhat less than now", 
+                             Public_Expense_Defense==5 ~ "Much less than now",
+                             is.na(Public_Expense_Defense) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Public_Expense_Pension=case_when(
+                             Public_Expense_Pension==1 ~ "Much more than now",
+                             Public_Expense_Pension==2 ~ "Somewhat more than now", 
+                             Public_Expense_Pension==3 ~ "The same as now",
+                             Public_Expense_Pension==4 ~ "Somewhat less than now", 
+                             Public_Expense_Pension==5 ~ "Much less than now",
+                             is.na(Public_Expense_Pension) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Public_Expense_Police=case_when(
+                             Public_Expense_Police==1 ~ "Much more than now",
+                             Public_Expense_Police==2 ~ "Somewhat more than now", 
+                             Public_Expense_Police==3 ~ "The same as now",
+                             Public_Expense_Police==4 ~ "Somewhat less than now", 
+                             Public_Expense_Police==5 ~ "Much less than now",
+                             is.na(Public_Expense_Police) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Public_Expense_Welfare=case_when(
+                             Public_Expense_Welfare==1 ~ "Much more than now",
+                             Public_Expense_Welfare==2 ~ "Somewhat more than now", 
+                             Public_Expense_Welfare==3 ~ "The same as now",
+                             Public_Expense_Welfare==4 ~ "Somewhat less than now", 
+                             Public_Expense_Welfare==5 ~ "Much less than now",
+                             is.na(Public_Expense_Welfare) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Improv_Standard=case_when(
+                             Improv_Standard==1 ~ "Very likely",
+                             Improv_Standard==2 ~ "Somewhat likely", 
+                             Improv_Standard==4 ~ "Somewhat unlikely", 
+                             Improv_Standard==5 ~ "Very unlikely",
+                             is.na(Improv_Standard) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                                  Economy=case_when(
+                             Economy==1 ~ "Better",
+                             Economy==3 ~ "Same",
+                             Economy==5 ~ "Worse",
+                             is.na(Economy) ~ "Missing")))
+
+final_political_data <- with(final_political_data,
+                           mutate(final_political_data, 
+                            Satisfaction_Democrat=case_when(
+                             Satisfaction_Democrat==1 ~ "Very Satisfied",
+                             Satisfaction_Democrat==2 ~ "Fairly Satisfied",
+                             Satisfaction_Democrat==4 ~ "Not very satisfied",
+                             Satisfaction_Democrat==5 ~ "Not at all satisfied",
+
+                             is.na(Satisfaction_Democrat) ~ "Missing")))
+
+```
+
+Convert character variables to factor
+
+```{r}
+final_political_data=final_political_data %>%
+  mutate_if(is.character,as.factor)
+```
+
+Make the bar charts: 
+```{r}
+barChart <- function(data, variable, x_label, title, color){
+  myplot <- ggplot(data, aes(x = variable), 
+                        y = count)
+  myplot + geom_bar(aes(), fill=color) +
+  labs(y="Number of people", x=x_label)+
+    ggtitle(title) +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+}
+```
+
+```{r, results="hide"}
+barChart(final_political_data, final_political_data$Left_Right_Wing, "Political Spectrum", "Political Spectrum distribution", "purple")
+
+barChart(final_political_data, final_political_data$Education, "Education Level", "Education Level Distribution", "darkslateblue")
+
+barChart(final_political_data, final_political_data$Public_Private_Employ, "Employment Sector", "Employment Sector Distribution", "coral3")
+
+barChart(final_political_data, final_political_data$Occupation, "Occupation", "Occupation Distribution", "aquamarine4")
+
+barChart(final_political_data, final_political_data$Household_Income, "Household Income", "Household Income  Distribution", "forestgreen")
+
+barChart(final_political_data, final_political_data$Household_Income, "Household Income", "Household Income  Distribution", "forestgreen")
+
+barChart(final_political_data, final_political_data$Religiousity, "Religiousity", "Religiousity Distribution", "cornflowerblue")
+
+barChart(final_political_data, final_political_data$Satisfaction_Democrat, "Satisfaction of Democracy", "Satisfaction of Democracy", "darkseagreen4")
+
+barChart(final_political_data, as.factor(final_political_data$Female), "Gender: 0 is male, 1 is female", "Distribution of Female", "pink3")
+
+barChart(final_political_data, final_political_data$Birth_COuntry, "Country", "Distribution of Country", "skyblue3")
+
+
+
+```
+
+```{r}
+#Create a new table of public expenditure opinion
+expenditure_opinion=data.frame(cbind(as.character(final_political_data$Public_Expense_Health),
+                                     as.character(final_political_data$Public_Expense_Edu),
+                                     as.character(final_political_data$Public_Expense_Defense), 
+                                     as.character(final_political_data$Public_Expense_Police),
+                                     as.character(final_political_data$Public_Expense_Welfare)))
+
+names(expenditure_opinion)=c("Health","Education","Defense", "Police", "Welfare")
+
+#Reshaping the table 
+expenditure_opinion <- expenditure_opinion %>%
+  gather(key="Expense", value="Opinion")
+
+#Plot it 
+myplot <- ggplot(expenditure_opinion, aes(fill=Expense, x = Opinion), 
+                        y = count)
+  myplot + geom_bar(aes(), position="dodge")+
+  labs(y="Number of people", x="Opinion on public expenditure")+
+    ggtitle("Opinion on public expenditure") +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+
+Set the countries with few observations as "Other":
+```{r, results="hide"}
+rareLevelAsOther <- function (variable, var_name, mydata, limit){
+  freq_table=as.data.frame(tally(~variable, data=mydata))
+  variable=as.factor(ifelse(freq_table[match(variable, freq_table[,1]),2]>limit, as.character(variable), "Other"))
+  index=getIndexFromName(mydata,var_name)
+  mydata[,index]=variable
+  return(mydata)
+}
+
+final_political_data=rareLevelAsOther(final_political_data$Birth_COuntry, "Birth_COuntry", final_political_data, 50)
+
+tally(~final_political_data$Birth_COuntry)
+```
+
+Check for multicollinearity: 
+```{r, result="hide"}
+reg_all=lm(Left_Right_Wing~.,data=final_political_data)
+vif(reg_all)
+```
+
+Now I run the backward selection algorithm again and pick the model with high R-squared and low AIC
+```{r}
+new_data=backwardElim(final_political_data,15,kfold=TRUE)
+```
+
+The second model is the best one. I choose the second model.
+
+Reset the levels of factor variables 
+```{r}
+final_political_data$Household_Income <- relevel(final_political_data$Household_Income, ref="Lowest Quantile")
+final_political_data$Religiousity <- relevel(final_political_data$Religiousity, ref="Not Religious")
+final_political_data$Education <- relevel(final_political_data$Education, ref="Early Childhood Education")
+final_political_data$Occupation <- relevel(final_political_data$Occupation, ref="Elementary Occupation")
+final_political_data$Employ_Status <- relevel(final_political_data$Employ_Status, ref="Full-time")
+final_political_data$Public_Private_Employ <- relevel(final_political_data$Public_Private_Employ, ref="Public")
+final_political_data$Employ_Status_Spouse <- relevel(final_political_data$Employ_Status_Spouse, ref="Unemployed")
+final_political_data$Public_Expense_Health <- relevel(final_political_data$Public_Expense_Health, ref="The same as now")
+final_political_data$Birth_COuntry <- relevel(final_political_data$Birth_COuntry, ref="Other")
+
+final_political_data$Public_Expense_Defense <- relevel(final_political_data$Public_Expense_Defense, ref="The same as now")
+final_political_data$Public_Expense_Welfare <- relevel(final_political_data$Public_Expense_Welfare, ref="The same as now")
+final_political_data$Public_Expense_Police <- relevel(final_political_data$Public_Expense_Police, ref="The same as now")
+final_political_data$Public_Expense_Edu <- relevel(final_political_data$Public_Expense_Edu, ref="The same as now")
+final_political_data$Improv_Standard <- relevel(final_political_data$Improv_Standard, ref="Very unlikely")
+final_political_data$Economy <- relevel(final_political_data$Economy, ref="Same")
+final_political_data$Satisfaction_Democrat <- relevel(final_political_data$Satisfaction_Democrat, ref="Very Satisfied")
+
+```
+
+#Model and Result
+
+Regression Model: 
+```{r}
+reg=lm(Left_Right_Wing ~ Education + Union_Membership + Union_Membership_Family + Employ_Status + Occupation + Public_Private_Employ+ Employ_Status_Spouse + Household_Income + Religiousity + Birth_COuntry + Public_Expense_Welfare+ Public_Expense_Police + Public_Expense_Health + Public_Expense_Defense + Public_Expense_Edu + Improv_Standard + Economy + Gov_Action_Dif_Income  + Satisfaction_Democrat, data=final_political_data)
+```
+
+Result 
+```{r, results="hide"}
+sum_reg=summary(reg)
+sum_reg$coefficients
+#write.csv(sum_reg$coefficients, "results.csv")
+```
+
+```{r}
+anova(reg)
+```
+
+Test for Equality of Variance Assumption
+```{r}
+ncvTest(reg)
+```
+
+Test for Normality Assumption
+```{r}
+plot(reg,which=c(2))
+```
+
